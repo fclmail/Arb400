@@ -1,0 +1,156 @@
+<!DOCTYPE html><html>
+<head>
+  <title>Polygon Arbitrage Trading</title>
+  <script src="https://cdn.jsdelivr.net/npm/ethers@5.7.2/dist/ethers.min.js"></script>
+  <style>
+    body { background-color: #001d2e; color: white; font-family: Arial, sans-serif; padding: 20px; }
+    button, input { padding: 8px; margin: 6px 0; font-size: 14px; }
+    table { width: 100%; border-collapse: collapse; margin-top: 20px; }
+    th, td { border: 1px solid #555; padding: 6px; text-align: center; }
+  </style>
+</head>
+<body>
+  <h2>Polygon Arbitrage Bot</h2>
+  <button onclick="connectWallet()">Connect Wallet</button>
+  <span id="walletAddress">Not connected</span><br><label>Trade Amount (USDC): </label> <input id="tradeAmount" type="number" step="0.0001" value="0.0001"><br>
+
+<label><input type="checkbox" id="autoTradeToggle"> Auto-Trade When Profitable</label>
+
+  <h3>Log (latest 20 entries)</h3>
+  <table>
+    <thead>
+      <tr>
+        <th>Time</th><th>Buy Token</th><th>Sell Token</th>
+        <th>Buy DEX</th><th>Sell DEX</th>
+        <th>Buy Price</th><th>Sell Price</th>
+        <th>Profit $</th><th>Profit %</th>
+      </tr>
+    </thead>
+    <tbody id="logTable"></tbody>
+  </table>  <h3>Cumulative Profit: $<span id="accProfit">0.000000</span></h3>  <script>
+    let provider, signer, walletAddress = "";
+    let accumulatedProfit = 0;
+
+    const tokens = {
+      USDC:  { addr: "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174", decimals: 6 },
+      DAI:   { addr: "0x8f3Cf7ad23Cd3CaDbD9735AFf958023239c6A063", decimals: 18 },
+      AAVE:  { addr: "0xD6DF932A45C0f255f85145F286eA0b292B21C90B", decimals: 18 },
+      LINK:  { addr: "0x53e0bca35ec356bd5dddfebbd1fc0fd03fabad39", decimals: 18 },
+      USDCe: { addr: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48", decimals: 6 }
+    };
+
+    const routers = {
+      QuickSwap: "0xa5E0829CaCEd8fFDD4De3c43696c57F7D7A678ff",
+      SushiSwap: "0x1b02da8cb0d097eb8d57a175b88c7d8b47997506"
+    };
+
+    const abi = [
+      "function getAmountsOut(uint amountIn, address[] memory path) view returns (uint[] memory)",
+      "function swapExactTokensForTokens(uint amountIn, uint amountOutMin, address[] calldata path, address to, uint deadline)"
+    ];
+
+    async function connectWallet() {
+      if (!window.ethereum) return alert("Please install MetaMask.");
+      provider = new ethers.providers.Web3Provider(window.ethereum);
+      await provider.send("eth_requestAccounts", []);
+      signer = provider.getSigner();
+      walletAddress = await signer.getAddress();
+      document.getElementById("walletAddress").textContent = walletAddress;
+    }
+
+    function logTrade(data) {
+      const row = document.createElement("tr");
+      row.innerHTML = `
+        <td>${new Date().toLocaleTimeString()}</td>
+        <td>${data.buyToken}</td><td>${data.sellToken}</td>
+        <td>${data.buyDEX}</td><td>${data.sellDEX}</td>
+        <td>${data.buyPrice.toFixed(6)}</td><td>${data.sellPrice.toFixed(6)}</td>
+        <td>${data.profit.toFixed(6)}</td><td>${data.profitPct.toFixed(2)}%</td>`;
+      const table = document.getElementById("logTable");
+      table.prepend(row);
+      if (table.rows.length > 20) table.deleteRow(-1);
+    }
+
+    async function simulateAndTrade() {
+      if (!signer) return;
+      const tradeAmt = parseFloat(document.getElementById("tradeAmount").value);
+      const autoTrade = document.getElementById("autoTradeToggle").checked;
+      const amountIn = ethers.utils.parseUnits(tradeAmt.toFixed(6), 6);
+
+      for (let [tokenName, token] of Object.entries(tokens)) {
+        if (tokenName === "USDC") continue;
+        for (let [buyDEXName, buyRouterAddr] of Object.entries(routers)) {
+          for (let [sellDEXName, sellRouterAddr] of Object.entries(routers)) {
+            if (buyDEXName === sellDEXName) continue;
+
+            const buyRouter = new ethers.Contract(buyRouterAddr, abi, provider);
+            const sellRouter = new ethers.Contract(sellRouterAddr, abi, provider);
+
+            try {
+              let buyPath = [tokens.USDC.addr, token.addr];
+              let buyAmounts = await buyRouter.getAmountsOut(amountIn, buyPath);
+              let tokensReceived = buyAmounts[1];
+
+              let sellPath = [token.addr, tokens.USDC.addr];
+              let sellAmounts = await sellRouter.getAmountsOut(tokensReceived, sellPath);
+              let usdcReceived = sellAmounts[1];
+
+              let profit = parseFloat(ethers.utils.formatUnits(usdcReceived, 6)) - tradeAmt;
+              let pct = (profit / tradeAmt) * 100;
+
+              logTrade({
+                buyToken: "USDC",
+                sellToken: tokenName,
+                buyDEX: buyDEXName,
+                sellDEX: sellDEXName,
+                buyPrice: parseFloat(ethers.utils.formatUnits(tokensReceived, token.decimals)) / tradeAmt,
+                sellPrice: parseFloat(ethers.utils.formatUnits(usdcReceived, 6)) / (parseFloat(ethers.utils.formatUnits(tokensReceived, token.decimals))),
+                profit, profitPct: pct
+              });
+
+              if (autoTrade && profit > 0.00001) {
+                alert(`Profit: $${profit.toFixed(6)} | ${pct.toFixed(2)}%. Confirm MetaMask.`);
+
+                const routerWithSigner = new ethers.Contract(buyRouterAddr, abi, signer);
+                const deadline = Math.floor(Date.now() / 1000) + 60;
+
+                // Approve USDC if necessary (should be implemented with ERC20 ABI)
+                // await usdcContract.approve(buyRouterAddr, amountIn);
+
+                const tx = await routerWithSigner.swapExactTokensForTokens(
+                  amountIn,
+                  0,
+                  buyPath,
+                  walletAddress,
+                  deadline
+                );
+                await tx.wait();
+
+                // Allow token to arrive before selling
+                await new Promise(r => setTimeout(r, 4000));
+
+                const sellRouterWithSigner = new ethers.Contract(sellRouterAddr, abi, signer);
+                const tx2 = await sellRouterWithSigner.swapExactTokensForTokens(
+                  tokensReceived,
+                  0,
+                  sellPath,
+                  walletAddress,
+                  deadline
+                );
+                await tx2.wait();
+
+                accumulatedProfit += profit;
+                document.getElementById("accProfit").textContent = accumulatedProfit.toFixed(6);
+              }
+
+            } catch (e) {
+              console.log("Sim error:", e.message);
+            }
+          }
+        }
+      }
+    }
+
+    setInterval(simulateAndTrade, 5000);
+  </script></body>
+</html>
